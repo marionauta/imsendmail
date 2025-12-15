@@ -3,6 +3,8 @@ const fs = std.fs;
 const http = std.http;
 const json = std.json;
 
+const Allocator = std.mem.Allocator;
+
 /// Call `File.close` to release the resource.
 pub fn open_configuration_file() ?fs.File {
     const cwd = fs.cwd();
@@ -43,15 +45,41 @@ const Recipient = union(RecipientType) {
     hostname: struct { []const u8, []const u8 },
 };
 
-pub fn parse_body_to(allocator: std.mem.Allocator, to: []const u8) !std.ArrayList([]const u8) {
-    var res: std.ArrayList([]const u8) = .empty;
+pub const Header = struct {
+    name: []const u8,
+    body: []const u8,
+};
+
+pub fn parse_header(raw: []const u8) ?Header {
+    const colon_index: usize = std.mem.indexOfScalar(u8, raw, ':') orelse {
+        return null;
+    };
+    const name = raw[0..colon_index];
+    const body = trimStart(raw[(colon_index + 1)..]);
+    return Header{ .name = name, .body = body };
+}
+
+pub const Message = struct {
+    headers: std.StringHashMap([]const u8),
+    body: []const u8,
+};
+
+test "parse header" {
+    const h1 = parse_header("Name: something").?;
+    try std.testing.expectEqualStrings("Name", h1.name);
+    try std.testing.expectEqualStrings("something", h1.body);
+    const h2 = parse_header("Again:joined").?;
+    try std.testing.expectEqualStrings("Again", h2.name);
+    try std.testing.expectEqualStrings("joined", h2.body);
+}
+
+pub fn parse_header_to_collect(to: []const u8, recipients: *std.StringHashMap(bool)) Allocator.Error!void {
     var it = std.mem.splitScalar(u8, to, ' ');
-    while (it.next()) |r| try res.append(allocator, r);
-    return res;
+    while (it.next()) |r| try recipients.put(r, true);
 }
 
 pub fn parse_recipient(address: []const u8) ?Recipient {
-    const at_index = std.mem.indexOfScalar(u8, address, '@') orelse return null;
+    const at_index = std.mem.lastIndexOfScalar(u8, address, '@') orelse return null;
     const username = address[0..at_index];
     if (username.len == 0) return null;
     const hostname = address[(at_index + 1)..];
@@ -65,7 +93,7 @@ pub fn parse_recipient(address: []const u8) ?Recipient {
 
 pub const Aliases = std.StringHashMap([]const u8);
 
-pub fn aliases_from_raw(allocator: std.mem.Allocator, raw: RawAliases) !Aliases {
+pub fn aliases_from_raw(allocator: Allocator, raw: RawAliases) Allocator.Error!Aliases {
     var aliases = Aliases.init(allocator);
     for (raw) |alias| {
         try aliases.put(alias[0], alias[1]);
@@ -83,10 +111,12 @@ pub const TelegramClient = struct {
 
 const TELEGRAM_BASE_URL = "https://api.telegram.org";
 
-pub fn send_message_telegram(allocator: std.mem.Allocator, client: TelegramClient, recipient: TelegramRecipient, message: []const u8) !void {
+pub fn send_message_telegram(allocator: std.mem.Allocator, client: TelegramClient, recipient: TelegramRecipient, message: Message) !void {
     const url = try std.fmt.allocPrint(allocator, "{s}/bot{s}/sendMessage", .{ TELEGRAM_BASE_URL, client.token });
     defer allocator.free(url);
-    const data = try format_message_telegram(allocator, recipient.chat_id, message);
+    const composed = try compose_message(allocator, message);
+    defer allocator.free(composed);
+    const data = try format_message_telegram(allocator, recipient.chat_id, composed);
     defer allocator.free(data);
     var http_client = http.Client{ .allocator = allocator };
     defer http_client.deinit();
@@ -103,12 +133,30 @@ pub fn send_message_telegram(allocator: std.mem.Allocator, client: TelegramClien
     }
 }
 
-pub fn format_message_telegram(allocator: std.mem.Allocator, chat_id: []const u8, message: []const u8) ![]const u8 {
+pub fn compose_message(allocator: Allocator, message: Message) !([]const u8) {
+    var res = std.io.Writer.Allocating.init(allocator);
+    var writer = &res.writer;
+    if (message.headers.get("Subject")) |subject| {
+        try writer.print("*{s}*\n", .{subject});
+    }
+    if (message.headers.get("From")) |from| {
+        try writer.print("from `{s}`\n", .{from});
+    }
+    if (message.headers.get("To")) |to| {
+        try writer.print("to `{s}`\n", .{to});
+    }
+    try writer.writeByte('\n');
+    _ = try writer.write(message.body);
+    return try res.toOwnedSlice();
+}
+
+pub fn format_message_telegram(allocator: Allocator, chat_id: []const u8, message: []const u8) ![]const u8 {
     const TelegramMessage = struct {
         chat_id: []const u8,
         text: []const u8,
+        parse_mode: []const u8,
     };
-    const tm = TelegramMessage{ .chat_id = chat_id, .text = message };
+    const tm = TelegramMessage{ .chat_id = chat_id, .text = message, .parse_mode = "MarkdownV2" };
     var res = std.io.Writer.Allocating.init(allocator);
     try json.Stringify.value(tm, .{}, &res.writer);
     return res.toOwnedSlice();
@@ -121,6 +169,22 @@ pub const Configuration = struct {
     telegram_token: []const u8,
     aliases: RawAliases,
 };
+
+fn trimStart(slice: []const u8) []const u8 {
+    var index: usize = 0;
+    for (slice) |char| {
+        if (!std.ascii.isWhitespace(char)) break;
+        index += 1;
+    }
+    return slice[index..];
+}
+
+test "trim start" {
+    try std.testing.expectEqualStrings("", trimStart(""));
+    try std.testing.expectEqualStrings("", trimStart("   "));
+    try std.testing.expectEqualStrings("a", trimStart("   a"));
+    try std.testing.expectEqualStrings("a", trimStart("\n\t\ra"));
+}
 
 test "open configuration file" {
     const f = open_configuration_file();
@@ -136,6 +200,11 @@ test "parse no username" {
 test "parse recipient" {
     const r = parse_recipient("1234@telegram");
     try std.testing.expectEqualStrings(r.?.telegram.chat_id, "1234");
+}
+
+test "parse username" {
+    const r = parse_recipient("@username@telegram").?;
+    try std.testing.expectEqualStrings(r.telegram.chat_id, "@username");
 }
 
 test "parse hostname" {
@@ -158,6 +227,6 @@ test "send_message_telegram" {
 
 test "format_message_telegram" {
     const message = try format_message_telegram(std.testing.allocator, "1234", "hello, world");
-    std.debug.print("message: {s}", .{message});
+    // std.debug.print("message: {s}", .{message});
     std.testing.allocator.free(message);
 }

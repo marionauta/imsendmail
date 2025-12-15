@@ -30,29 +30,27 @@ pub fn main() !void {
     var stdin_buffer: [1024]u8 = undefined;
     var stdin = std.fs.File.stdin();
     var stdin_reader = stdin.reader(&stdin_buffer);
-
     var message_writer = io.Writer.Allocating.init(allocator);
     _ = try stdin_reader.interface.streamRemaining(&message_writer.writer);
-    const message_body = try message_writer.toOwnedSlice();
+    const raw_message = try message_writer.toOwnedSlice();
+    var headers = std.StringHashMap([]const u8).init(allocator);
+    defer headers.deinit();
 
-    var message_reader = io.Reader.fixed(message_body);
-    var content_type: std.ArrayList(u8) = .empty;
-    defer content_type.deinit(allocator);
+    var message_reader = io.Reader.fixed(raw_message);
     var message_start: usize = 0;
-    while (try message_reader.takeDelimiter('\n')) |line| {
+    header_body_parser: while (try message_reader.takeDelimiter('\n')) |line| {
         if (line.len == 0) {
             message_start = message_reader.seek;
-            break;
+            break :header_body_parser;
         }
-        if (line.len > 3 and std.mem.eql(u8, line[0..3], "To:")) {
-            var recs = try sendmail.parse_body_to(allocator, line[3..]);
-            defer recs.deinit(allocator);
-            for (recs.items) |r| try recipients.put(r, true);
-        } else if (line.len > 13 and std.mem.eql(u8, line[0..13], "Content-Type:")) {
-            try content_type.appendSlice(allocator, line[13..]);
-        }
+        const header = sendmail.parse_header(line) orelse continue;
+        try headers.put(header.name, header.body);
     }
-    const message_body_body = message_body[message_start..];
+    const message_body: []const u8 = raw_message[message_start..];
+
+    if (headers.get("To")) |to| {
+        try sendmail.parse_header_to_collect(to, &recipients);
+    }
 
     if (recipients.unmanaged.size == 0) {
         std.log.err("no senders provided", .{});
@@ -70,9 +68,14 @@ pub fn main() !void {
             continue :send_message;
         };
 
-        const m = if (std.mem.indexOf(u8, content_type.items, "html")) |_| try press_html(allocator, message_body_body) else message_body_body;
-
-        sendmail.send_message_telegram(allocator, client, recipient.telegram, m) catch |err| {
+        var m = message_body;
+        if (headers.get("Content-Type")) |content_type| {
+            if (std.mem.containsAtLeast(u8, content_type, 1, "html")) {
+                m = try press_html(allocator, message_body);
+            }
+        }
+        const message = sendmail.Message{ .headers = headers, .body = m };
+        sendmail.send_message_telegram(allocator, client, recipient.telegram, message) catch |err| {
             std.log.err("failed to send message: {}", .{err});
         };
     }
@@ -109,7 +112,7 @@ fn write_element(writer: *io.Writer, element: *rem.Dom.Element) !void {
     }
 }
 
-pub fn utf8DecodeString(allocator: std.mem.Allocator, string: []const u8) ![]const u21 {
+fn utf8DecodeString(allocator: std.mem.Allocator, string: []const u8) ![]const u21 {
     var result: std.ArrayList(u21) = .empty;
     var decoded = try std.unicode.Utf8View.init(string);
     var decoded_it = decoded.iterator();
