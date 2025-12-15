@@ -41,6 +41,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const rem_dependency = b.dependency("rem", .{});
+
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -79,6 +81,7 @@ pub fn build(b: *std.Build) void {
                 // can be extremely useful in case of collisions (which can happen
                 // importing modules from different packages).
                 .{ .name = "sendmail", .module = mod },
+                .{ .name = "rem", .module = rem_dependency.module("rem") },
             },
         }),
     });

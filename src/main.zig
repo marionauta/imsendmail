@@ -1,6 +1,7 @@
 const std = @import("std");
 const io = std.Io;
 const sendmail = @import("sendmail");
+const rem = @import("rem");
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -35,14 +36,23 @@ pub fn main() !void {
     const message_body = try message_writer.toOwnedSlice();
 
     var message_reader = io.Reader.fixed(message_body);
-    to: while (try message_reader.takeDelimiter('\n')) |line| {
-        if (std.mem.eql(u8, line[0..3], "To:")) {
-            var recs = try sendmail.parse_body_to(allocator, line[4..]);
+    var content_type: std.ArrayList(u8) = .empty;
+    defer content_type.deinit(allocator);
+    var message_start: usize = 0;
+    while (try message_reader.takeDelimiter('\n')) |line| {
+        if (line.len == 0) {
+            message_start = message_reader.seek;
+            break;
+        }
+        if (line.len > 3 and std.mem.eql(u8, line[0..3], "To:")) {
+            var recs = try sendmail.parse_body_to(allocator, line[3..]);
             defer recs.deinit(allocator);
             for (recs.items) |r| try recipients.put(r, true);
-            break :to;
+        } else if (line.len > 13 and std.mem.eql(u8, line[0..13], "Content-Type:")) {
+            try content_type.appendSlice(allocator, line[13..]);
         }
     }
+    const message_body_body = message_body[message_start..];
 
     if (recipients.unmanaged.size == 0) {
         std.log.err("no senders provided", .{});
@@ -60,8 +70,51 @@ pub fn main() !void {
             continue :send_message;
         };
 
-        sendmail.send_message_telegram(allocator, client, recipient.telegram, message_body) catch |err| {
+        const m = if (std.mem.indexOf(u8, content_type.items, "html")) |_| try press_html(allocator, message_body_body) else message_body_body;
+
+        sendmail.send_message_telegram(allocator, client, recipient.telegram, m) catch |err| {
             std.log.err("failed to send message: {}", .{err});
         };
     }
+}
+
+fn press_html(allocator: std.mem.Allocator, html: []const u8) !([]const u8) {
+    const decoded = try utf8DecodeString(allocator, html);
+    defer allocator.free(decoded);
+    var dom = rem.Dom{ .allocator = allocator };
+    defer dom.deinit();
+    var parser = try rem.Parser.init(&dom, decoded, allocator, .report, false);
+    defer parser.deinit();
+    try parser.run();
+    var stdout_writer = io.Writer.Allocating.init(allocator);
+    const stdout = &stdout_writer.writer;
+    const document = parser.getDocument();
+    if (document.element) |element| try write_element(stdout, element);
+    try stdout.flush();
+    return stdout_writer.toOwnedSlice();
+}
+
+fn write_element(writer: *io.Writer, element: *rem.Dom.Element) !void {
+    if (element.element_type == .html_style) return;
+    for (element.children.items) |child| {
+        switch (child) {
+            .cdata => |cd| {
+                if (cd.interface == .text) {
+                    std.debug.print("{s}", .{cd.data.items});
+                    _ = try writer.write(cd.data.items);
+                }
+            },
+            .element => |e| try write_element(writer, e),
+        }
+    }
+}
+
+pub fn utf8DecodeString(allocator: std.mem.Allocator, string: []const u8) ![]const u21 {
+    var result: std.ArrayList(u21) = .empty;
+    var decoded = try std.unicode.Utf8View.init(string);
+    var decoded_it = decoded.iterator();
+    while (decoded_it.nextCodepoint()) |codepoint| {
+        try result.append(allocator, codepoint);
+    }
+    return result.toOwnedSlice(allocator);
 }
