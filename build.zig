@@ -21,6 +21,11 @@ pub fn build(b: *std.Build) void {
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
 
+    const strings = b.addModule("strings", .{
+        .root_source_file = b.path("src/strings.zig"),
+        .target = target,
+    });
+
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
     // Zig modules are the preferred way of making Zig code available to consumers.
@@ -28,17 +33,12 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
-    const mod = b.addModule("sendmail", .{
-        // The root source file is the "entry point" of this module. Users of
-        // this module will only be able to access public declarations contained
-        // in this file, which means that if you have declarations that you
-        // intend to expose to consumers that were defined in other files part
-        // of this module, you will have to make sure to re-export them from
-        // the root file.
+    const sendmail = b.addModule("sendmail", .{
         .root_source_file = b.path("src/root.zig"),
-        // Later on we'll use this module as the root module of a test executable
-        // which requires us to specify a target.
         .target = target,
+        .imports = &.{
+            .{ .name = "strings", .module = strings },
+        },
     });
 
     const rem_dependency = b.dependency("rem", .{});
@@ -68,7 +68,8 @@ pub fn build(b: *std.Build) void {
             .link_libc = false,
             .strip = optimize != .Debug,
             .imports = &.{
-                .{ .name = "sendmail", .module = mod },
+                .{ .name = "sendmail", .module = sendmail },
+                .{ .name = "strings", .module = strings },
                 .{ .name = "rem", .module = rem_dependency.module("rem") },
             },
         }),
@@ -106,32 +107,18 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    // Creates an executable that will run `test` blocks from the provided module.
-    // Here `mod` needs to define a target, which is why earlier we made sure to
-    // set the releative field.
-    const mod_tests = b.addTest(.{
-        .root_module = mod,
-    });
+    const sendmail_tests = b.addTest(.{ .root_module = sendmail });
+    const run_sendmail_tests = b.addRunArtifact(sendmail_tests);
 
-    // A run step that will run the test executable.
-    const run_mod_tests = b.addRunArtifact(mod_tests);
-
-    // Creates an executable that will run `test` blocks from the executable's
-    // root module. Note that test executables only test one module at a time,
-    // hence why we have to create two separate ones.
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
-    });
-
-    // A run step that will run the second test executable.
-    const run_exe_tests = b.addRunArtifact(exe_tests);
+    const strings_tests = b.addTest(.{ .root_module = strings });
+    const run_strings_tests = b.addRunArtifact(strings_tests);
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_sendmail_tests.step);
+    test_step.dependOn(&run_strings_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

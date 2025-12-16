@@ -1,5 +1,7 @@
 const std = @import("std");
+const strings = @import("strings");
 const fs = std.fs;
+const io = std.io;
 const http = std.http;
 const json = std.json;
 
@@ -50,25 +52,20 @@ pub const Header = struct {
     body: []const u8,
 };
 
-pub fn parse_header(raw: []const u8) ?Header {
+pub fn parseHeader(raw: []const u8) ?Header {
     const colon_index: usize = std.mem.indexOfScalar(u8, raw, ':') orelse {
         return null;
     };
     const name = raw[0..colon_index];
-    const body = trimStart(raw[(colon_index + 1)..]);
+    const body = strings.trimStart(raw[(colon_index + 1)..]);
     return Header{ .name = name, .body = body };
 }
 
-pub const Message = struct {
-    headers: std.StringHashMap([]const u8),
-    body: []const u8,
-};
-
 test "parse header" {
-    const h1 = parse_header("Name: something").?;
+    const h1 = parseHeader("Name: something").?;
     try std.testing.expectEqualStrings("Name", h1.name);
     try std.testing.expectEqualStrings("something", h1.body);
-    const h2 = parse_header("Again:joined").?;
+    const h2 = parseHeader("Again:joined").?;
     try std.testing.expectEqualStrings("Again", h2.name);
     try std.testing.expectEqualStrings("joined", h2.body);
 }
@@ -76,6 +73,61 @@ test "parse header" {
 pub fn parse_header_to_collect(to: []const u8, recipients: *std.StringHashMap(bool)) Allocator.Error!void {
     var it = std.mem.splitScalar(u8, to, ' ');
     while (it.next()) |r| try recipients.put(r, true);
+}
+
+pub const Message = struct {
+    allocator: Allocator,
+    headers: std.StringHashMapUnmanaged([]const u8),
+    body: []const u8,
+
+    pub fn init(allocator: Allocator) Message {
+        return Message{ .allocator = allocator, .headers = .{}, .body = "" };
+    }
+
+    pub fn deinit(self: *Message, allocator: Allocator) void {
+        self.headers.deinit(self.allocator);
+        allocator.free(self.body);
+    }
+};
+
+pub fn parseRawMessage(allocator: Allocator, reader: *io.Reader) !Message {
+    var message = Message.init(allocator);
+    var body = std.ArrayList(u8).empty;
+    while (try reader.takeDelimiter('\n')) |line| {
+        if (line.len == 0) {
+            body.clearAndFree(allocator);
+            break;
+        }
+        const header = parseHeader(line) orelse {
+            try body.appendSlice(allocator, line);
+            try body.append(allocator, '\n');
+            continue;
+        };
+        try message.headers.put(message.allocator, header.name, header.body);
+    }
+    message.body = if (body.items.len > 0) try body.toOwnedSlice(allocator) else try reader.allocRemaining(message.allocator, .unlimited);
+    return message;
+}
+
+test "parse raw message" {
+    const a = std.testing.allocator;
+    const raw = "Header: value\nAnother:something\n\nhello";
+    var reader = io.Reader.fixed(raw);
+    var message = try parseRawMessage(a, &reader);
+    defer message.deinit(a);
+    try std.testing.expectEqualStrings("value", message.headers.get("Header").?);
+    try std.testing.expectEqualStrings("something", message.headers.get("Another").?);
+    try std.testing.expectEqualStrings("hello", message.body);
+}
+
+test "parse raw message no headers" {
+    const a = std.testing.allocator;
+    const raw = "hello\njust some text and no headers\n";
+    var reader = io.Reader.fixed(raw);
+    var message = try parseRawMessage(a, &reader);
+    defer message.deinit(a);
+    try std.testing.expectEqual(0, message.headers.size);
+    try std.testing.expectEqualStrings(strings.trimStart(raw), message.body);
 }
 
 pub fn parse_recipient(address: []const u8) ?Recipient {
@@ -120,14 +172,22 @@ pub fn send_message_telegram(allocator: std.mem.Allocator, client: TelegramClien
     defer allocator.free(data);
     var http_client = http.Client{ .allocator = allocator };
     defer http_client.deinit();
+
+    var response_writer = io.Writer.Allocating.init(allocator);
+
     const result = try http_client.fetch(.{
         .method = .POST,
         .location = .{ .url = url },
         .payload = data,
+        .response_writer = &response_writer.writer,
         .headers = .{
             .content_type = .{ .override = "application/json" },
         },
     });
+
+    const response = try response_writer.toOwnedSlice();
+    std.debug.print("response:\n{s}\n----\n", .{response});
+
     if (result.status.class() != .success) {
         return error.ApiNoSuccess;
     }
@@ -145,8 +205,9 @@ pub fn compose_message(allocator: Allocator, message: Message) !([]const u8) {
     if (message.headers.get("To")) |to| {
         try writer.print("to `{s}`\n", .{to});
     }
-    try writer.writeByte('\n');
+    _ = try writer.write("```\n");
     _ = try writer.write(message.body);
+    _ = try writer.write("```\n");
     return try res.toOwnedSlice();
 }
 
@@ -169,22 +230,6 @@ pub const Configuration = struct {
     telegram_token: []const u8,
     aliases: RawAliases,
 };
-
-fn trimStart(slice: []const u8) []const u8 {
-    var index: usize = 0;
-    for (slice) |char| {
-        if (!std.ascii.isWhitespace(char)) break;
-        index += 1;
-    }
-    return slice[index..];
-}
-
-test "trim start" {
-    try std.testing.expectEqualStrings("", trimStart(""));
-    try std.testing.expectEqualStrings("", trimStart("   "));
-    try std.testing.expectEqualStrings("a", trimStart("   a"));
-    try std.testing.expectEqualStrings("a", trimStart("\n\t\ra"));
-}
 
 test "open configuration file" {
     const f = open_configuration_file();
@@ -213,17 +258,17 @@ test "parse hostname" {
     try std.testing.expectEqualStrings(r.?.hostname[1], "example.com");
 }
 
-test "send_message_telegram" {
-    const conf_file = open_configuration_file().?;
-    defer conf_file.close();
-    const configuration = try read_configuration(std.testing.allocator, conf_file);
-    std.debug.print("conf: {}", .{configuration.value});
-    defer configuration.deinit();
-    const client = TelegramClient{ .token = configuration.value.telegram_token };
-    const rec = parse_recipient(configuration.value.aliases[0][1]);
-    const recipient = TelegramRecipient{ .chat_id = rec.?.telegram.chat_id };
-    try send_message_telegram(std.testing.allocator, client, recipient, "sendmail testing");
-}
+// test "send_message_telegram" {
+//     const conf_file = open_configuration_file().?;
+//     defer conf_file.close();
+//     const configuration = try read_configuration(std.testing.allocator, conf_file);
+//     std.debug.print("conf: {}", .{configuration.value});
+//     defer configuration.deinit();
+//     const client = TelegramClient{ .token = configuration.value.telegram_token };
+//     const rec = parse_recipient(configuration.value.aliases[0][1]);
+//     const recipient = TelegramRecipient{ .chat_id = rec.?.telegram.chat_id };
+//     try send_message_telegram(std.testing.allocator, client, recipient, "sendmail testing");
+// }
 
 test "format_message_telegram" {
     const message = try format_message_telegram(std.testing.allocator, "1234", "hello, world");

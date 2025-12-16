@@ -1,6 +1,7 @@
 const std = @import("std");
 const io = std.Io;
 const sendmail = @import("sendmail");
+const strings = @import("strings");
 const rem = @import("rem");
 
 pub fn main() !void {
@@ -30,25 +31,11 @@ pub fn main() !void {
     var stdin_buffer: [1024]u8 = undefined;
     var stdin = std.fs.File.stdin();
     var stdin_reader = stdin.reader(&stdin_buffer);
-    var message_writer = io.Writer.Allocating.init(allocator);
-    _ = try stdin_reader.interface.streamRemaining(&message_writer.writer);
-    const raw_message = try message_writer.toOwnedSlice();
-    var headers = std.StringHashMap([]const u8).init(allocator);
-    defer headers.deinit();
 
-    var message_reader = io.Reader.fixed(raw_message);
-    var message_start: usize = 0;
-    header_body_parser: while (try message_reader.takeDelimiter('\n')) |line| {
-        if (line.len == 0) {
-            message_start = message_reader.seek;
-            break :header_body_parser;
-        }
-        const header = sendmail.parse_header(line) orelse continue;
-        try headers.put(header.name, header.body);
-    }
-    const message_body: []const u8 = raw_message[message_start..];
+    var message = try sendmail.parseRawMessage(allocator, &stdin_reader.interface);
+    defer message.deinit(allocator);
 
-    if (headers.get("To")) |to| {
+    if (message.headers.get("To")) |to| {
         try sendmail.parse_header_to_collect(to, &recipients);
     }
 
@@ -68,13 +55,13 @@ pub fn main() !void {
             continue :send_message;
         };
 
-        var m = message_body;
-        if (headers.get("Content-Type")) |content_type| {
-            if (std.mem.containsAtLeast(u8, content_type, 1, "html")) {
-                m = try press_html(allocator, message_body);
+        if (message.headers.get("Content-Type")) |content_type| {
+            if (strings.contains(content_type, "html")) {
+                const body = try press_html(message.allocator, message.body);
+                message.allocator.free(message.body);
+                message.body = body;
             }
         }
-        const message = sendmail.Message{ .headers = headers, .body = m };
         sendmail.send_message_telegram(allocator, client, recipient.telegram, message) catch |err| {
             std.log.err("failed to send message: {}", .{err});
         };
