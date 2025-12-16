@@ -18,19 +18,74 @@ pub fn open_configuration_file() ?fs.File {
     return file;
 }
 
-/// Call `Parsed.deinit` to release the resource.
-pub fn read_configuration(allocator: std.mem.Allocator, file: fs.File) !json.Parsed(Configuration) {
-    const raw_configuration = try file.readToEndAlloc(allocator, 1024);
-    // defer allocator.free(raw_configuration);
-    const parsed: json.Parsed(Configuration) = try json.parseFromSlice(
-        Configuration,
-        allocator,
-        raw_configuration,
-        .{
-            .ignore_unknown_fields = true,
+pub const Aliases = std.StringHashMap([]const u8);
+
+pub const Configuration = struct {
+    arena: *std.heap.ArenaAllocator,
+    telegram_token: []const u8 = "",
+    aliases: Aliases,
+
+    pub fn init(arena: *std.heap.ArenaAllocator) Configuration {
+        return .{ .arena = arena, .aliases = .init(arena.allocator()) };
+    }
+
+    pub fn deinit(self: *Configuration) void {
+        const allocator = self.arena.child_allocator;
+        self.arena.deinit();
+        allocator.destroy(self.arena);
+    }
+};
+
+/// Call `Configuration.deinit` to release the resource.
+/// TODO: clean up aliases read.
+pub fn readConfiguration(allocator: Allocator, reader: *io.Reader) !Configuration {
+    const C = struct {
+        telegram_token: []const u8,
+        aliases: json.Value,
+    };
+
+    var jreader = json.Reader.init(allocator, reader);
+    defer jreader.deinit();
+
+    const parsed: json.Parsed(C) = try json.parseFromTokenSource(C, allocator, &jreader, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+
+    var configuration = Configuration.init(parsed.arena);
+    configuration.telegram_token = parsed.value.telegram_token;
+    switch (parsed.value.aliases) {
+        .object => |map| {
+            var it = map.iterator();
+            while (it.next()) |entry| {
+                const alias = entry.key_ptr.*;
+                switch (entry.value_ptr.*) {
+                    .string => |resolved| try configuration.aliases.put(alias, resolved),
+                    else => return error.InvalidAliasValue,
+                }
+            }
         },
-    );
-    return parsed;
+        else => return error.InvalidAliases,
+    }
+    return configuration;
+}
+
+test "read configuration" {
+    const a = std.testing.allocator;
+    const raw =
+        \\{
+        \\  "telegram_token": "token",
+        \\  "aliases": {
+        \\    "alias": "resolved"
+        \\  }
+        \\}
+    ;
+    var reader = io.Reader.fixed(raw);
+    var configuration = try readConfiguration(a, &reader);
+    defer configuration.deinit();
+
+    try std.testing.expectEqualStrings("token", configuration.telegram_token);
+    try std.testing.expectEqualStrings("resolved", configuration.aliases.get("alias").?);
 }
 
 const RecipientType = enum {
@@ -143,18 +198,8 @@ pub fn parse_recipient(address: []const u8) ?Recipient {
     return null;
 }
 
-pub const Aliases = std.StringHashMap([]const u8);
-
-pub fn aliases_from_raw(allocator: Allocator, raw: RawAliases) Allocator.Error!Aliases {
-    var aliases = Aliases.init(allocator);
-    for (raw) |alias| {
-        try aliases.put(alias[0], alias[1]);
-    }
-    return aliases;
-}
-
-pub fn resolve_recipient_alias(aliases: Aliases, recipient: []const u8) []const u8 {
-    return aliases.get(recipient) orelse recipient;
+pub fn resolveRecipientAlias(aliases: Aliases, recipient: []const u8) []const u8 {
+    return aliases.get(recipient) orelse aliases.get("*") orelse recipient;
 }
 
 pub const TelegramClient = struct {
@@ -222,14 +267,6 @@ pub fn format_message_telegram(allocator: Allocator, chat_id: []const u8, messag
     try json.Stringify.value(tm, .{}, &res.writer);
     return res.toOwnedSlice();
 }
-
-pub const RawAlias = [2]([]const u8);
-pub const RawAliases = []RawAlias;
-
-pub const Configuration = struct {
-    telegram_token: []const u8,
-    aliases: RawAliases,
-};
 
 test "open configuration file" {
     const f = open_configuration_file();

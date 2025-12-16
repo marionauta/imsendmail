@@ -13,7 +13,9 @@ pub fn main() !void {
         std.process.exit(1);
     };
     defer conf_file.close();
-    const configuration: std.json.Parsed(sendmail.Configuration) = sendmail.read_configuration(allocator, conf_file) catch |err| {
+    var conf_buffer: [1024]u8 = undefined;
+    var reader = conf_file.reader(&conf_buffer);
+    var configuration = sendmail.readConfiguration(allocator, &reader.interface) catch |err| {
         std.log.err("unable to read configuration file: {}", .{err});
         std.process.exit(1);
     };
@@ -44,17 +46,14 @@ pub fn main() !void {
         std.process.exit(1);
     }
 
-    var aliases = try sendmail.aliases_from_raw(allocator, configuration.value.aliases);
-    defer aliases.deinit();
-    const client = sendmail.TelegramClient{ .token = configuration.value.telegram_token };
+    const client = sendmail.TelegramClient{ .token = configuration.telegram_token };
 
     var it = recipients.keyIterator();
     send_message: while (it.next()) |raw_recipient| {
-        const aliased = sendmail.resolve_recipient_alias(aliases, raw_recipient.*);
+        const aliased = sendmail.resolveRecipientAlias(configuration.aliases, raw_recipient.*);
         const recipient = sendmail.parse_recipient(aliased) orelse {
             continue :send_message;
         };
-
         if (message.headers.get("Content-Type")) |content_type| {
             if (strings.contains(content_type, "html")) {
                 const body = try press_html(message.allocator, message.body);
