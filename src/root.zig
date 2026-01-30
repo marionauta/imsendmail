@@ -226,7 +226,7 @@ const TELEGRAM_BASE_URL = "https://api.telegram.org";
 pub fn send_message_telegram(allocator: std.mem.Allocator, client: TelegramClient, recipient: TelegramRecipient, message: Message) !void {
     const url = try std.fmt.allocPrint(allocator, "{s}/bot{s}/sendMessage", .{ TELEGRAM_BASE_URL, client.token });
     defer allocator.free(url);
-    const composed = try compose_message(allocator, message);
+    const composed = try composeMessage(allocator, message);
     defer allocator.free(composed);
     const data = try format_message_telegram(allocator, recipient.chat_id, composed);
     defer allocator.free(data);
@@ -253,11 +253,38 @@ pub fn send_message_telegram(allocator: std.mem.Allocator, client: TelegramClien
     }
 }
 
-pub fn compose_message(allocator: Allocator, message: Message) !([]const u8) {
+fn writeEscapedMarkdown(writer: *io.Writer, text: []const u8) !usize {
+    var count: usize = 0;
+    const special = "_*[]()~`>#+-=|{}.!";
+    for (text) |char| {
+        if (std.mem.indexOfScalar(u8, special, char) != null) {
+            try writer.writeByte('\\');
+            count += 1;
+        }
+        try writer.writeByte(char);
+        count += 1;
+    }
+    return count;
+}
+
+test "write escaped markdown" {
+    const a = std.testing.allocator;
+    var buffer = std.io.Writer.Allocating.init(a);
+    defer buffer.deinit();
+    const writer = &buffer.writer;
+    _ = try writeEscapedMarkdown(writer, "a_*[]()~`>#+-=|{}.!");
+    const result = try buffer.toOwnedSlice();
+    defer a.free(result);
+    try std.testing.expectEqualStrings("a\\_\\*\\[\\]\\(\\)\\~\\`\\>\\#\\+\\-\\=\\|\\{\\}\\.\\!", result);
+}
+
+pub fn composeMessage(allocator: Allocator, message: Message) ![]const u8 {
     var res = std.io.Writer.Allocating.init(allocator);
     var writer = &res.writer;
     if (message.headers.get("Subject")) |subject| {
-        try writer.print("*{s}*\n", .{subject});
+        try writer.writeByte('*');
+        _ = try writeEscapedMarkdown(writer, subject);
+        _ = try writer.write("*\n");
     }
     if (message.headers.get("From")) |from| {
         try writer.print("from `{s}`\n", .{from});
@@ -265,9 +292,7 @@ pub fn compose_message(allocator: Allocator, message: Message) !([]const u8) {
     if (message.headers.get("To")) |to| {
         try writer.print("to `{s}`\n", .{to});
     }
-    _ = try writer.write("```\n");
-    _ = try writer.write(message.body);
-    _ = try writer.write("```\n");
+    _ = try writeEscapedMarkdown(writer, message.body);
     return try res.toOwnedSlice();
 }
 
