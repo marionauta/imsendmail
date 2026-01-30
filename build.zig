@@ -1,4 +1,5 @@
 const std = @import("std");
+const deb = @import("build_deb.zig");
 
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
@@ -131,4 +132,7 @@ pub fn build(b: *std.Build) void {
     //
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
+
+    // Debian package generation step
+    deb.addDebStep(b, exe);
 }
