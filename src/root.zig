@@ -7,15 +7,21 @@ const json = std.json;
 
 const Allocator = std.mem.Allocator;
 
+fn openConfigAt(buf: *[fs.max_path_bytes]u8, dir: ?[]const u8, name: []const u8) ?fs.File {
+    const base = dir orelse return null;
+    const path = std.fmt.bufPrint(buf, "{s}{s}", .{ base, name }) catch return null;
+    return fs.openFileAbsolute(path, .{}) catch null;
+}
+
 /// Call `File.close` to release the resource.
 pub fn open_configuration_file() ?fs.File {
-    const cwd = fs.cwd();
-    var file: ?fs.File = cwd.openFile("sendmailrc.json", .{}) catch null;
-    if (file == null) {
-        std.log.info("local file is null", .{});
-        file = fs.openFileAbsolute("/etc/sendmailrc.json", .{}) catch null;
-    }
-    return file;
+    const filename = "imsendmailrc.json";
+    var buf: [fs.max_path_bytes]u8 = undefined;
+
+    return fs.cwd().openFile(filename, .{}) catch
+        openConfigAt(&buf, std.posix.getenv("XDG_CONFIG_HOME"), "/imsendmail/" ++ filename) orelse
+        openConfigAt(&buf, std.posix.getenv("HOME"), "/.config/imsendmail/" ++ filename) orelse
+        openConfigAt(&buf, "/etc/", filename);
 }
 
 pub const Aliases = std.StringHashMap([]const u8);
