@@ -32,7 +32,7 @@ pub fn addDebStep(b: *std.Build, exe: *std.Build.Step.Compile) void {
     const name = @tagName(metadata.name);
     const version = metadata.version;
     const maintainer = metadata.maintainer.name ++ " <" ++ metadata.maintainer.email ++ ">";
-    const deb_name = b.fmt("sendmail-im_{s}_{s}.deb", .{ version, deb_arch });
+    const deb_name = b.fmt("{s}_{s}_{s}.deb", .{ name, version, deb_arch });
 
     // Create package directory structure using WriteFiles
     const wf = b.addWriteFiles();
