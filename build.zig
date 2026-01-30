@@ -22,18 +22,21 @@ pub fn build(b: *std.Build) void {
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
 
+    const rem_dependency = b.dependency("rem", .{});
+
     const strings = b.addModule("strings", .{
         .root_source_file = b.path("src/strings.zig"),
         .target = target,
     });
 
-    // This creates a module, which represents a collection of source files alongside
-    // some compilation options, such as optimization mode and linked system libraries.
-    // Zig modules are the preferred way of making Zig code available to consumers.
-    // addModule defines a module that we intend to make available for importing
-    // to our consumers. We must give it a name because a Zig package can expose
-    // multiple modules and consumers will need to be able to specify which
-    // module they want to access.
+    const html = b.addModule("html", .{
+        .root_source_file = b.path("src/html.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "rem", .module = rem_dependency.module("rem") },
+        },
+    });
+
     const sendmail = b.addModule("sendmail", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -41,8 +44,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "strings", .module = strings },
         },
     });
-
-    const rem_dependency = b.dependency("rem", .{});
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -71,7 +72,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "sendmail", .module = sendmail },
                 .{ .name = "strings", .module = strings },
-                .{ .name = "rem", .module = rem_dependency.module("rem") },
+                .{ .name = "html", .module = html },
             },
         }),
     });

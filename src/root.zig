@@ -246,7 +246,7 @@ pub fn send_message_telegram(allocator: std.mem.Allocator, client: TelegramClien
     });
 
     const response = try response_writer.toOwnedSlice();
-    std.debug.print("response:\n{s}\n----\n", .{response});
+    std.log.debug("response:\n{s}\n----\n", .{response});
 
     if (result.status.class() != .success) {
         return error.ApiNoSuccess;
