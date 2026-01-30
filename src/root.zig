@@ -140,6 +140,11 @@ pub const Message = struct {
     }
 
     pub fn deinit(self: *Message, allocator: Allocator) void {
+        var it = self.headers.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
         self.headers.deinit(self.allocator);
         allocator.free(self.body);
     }
@@ -158,7 +163,11 @@ pub fn parseRawMessage(allocator: Allocator, reader: *io.Reader) !Message {
             try body.append(allocator, '\n');
             continue;
         };
-        try message.headers.put(message.allocator, header.name, header.body);
+        try message.headers.put(
+            message.allocator,
+            try message.allocator.dupe(u8, header.name),
+            try message.allocator.dupe(u8, header.body),
+        );
     }
     message.body = if (body.items.len > 0) try body.toOwnedSlice(allocator) else try reader.allocRemaining(message.allocator, .unlimited);
     return message;
