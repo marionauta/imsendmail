@@ -46,7 +46,7 @@ pub fn main() !void {
     }
 
     if (message.headers.get("Content-Type")) |content_type| {
-        if (strings.contains(content_type, "html")) {
+        if (strings.contains(content_type, "text/html")) {
             const body = try html.toPlainText(message.allocator, message.body);
             message.allocator.free(message.body);
             message.body = body;

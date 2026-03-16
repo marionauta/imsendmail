@@ -15,6 +15,7 @@ pub fn toPlainText(allocator: std.mem.Allocator, html: []const u8) ![]const u8 {
     defer parser.deinit();
     try parser.run();
     var writer_allocating = Writer.Allocating.init(allocator);
+    defer writer_allocating.deinit();
     const writer = &writer_allocating.writer;
     const document = parser.getDocument();
     if (document.element) |element| try writeElement(writer, element, false);
@@ -67,13 +68,7 @@ fn writeChildren(writer: *Writer, element: *rem.Dom.Element, in_pre: bool, at_bl
                     if (in_pre) {
                         _ = try writer.write(cd.data.items);
                     } else {
-                        try writeCollapsedText(writer, cd.data.items, skip_ws);
-                        for (cd.data.items) |c| {
-                            if (!std.ascii.isWhitespace(c)) {
-                                skip_ws = false;
-                                break;
-                            }
-                        }
+                        skip_ws = try writeCollapsedText(writer, cd.data.items, skip_ws);
                     }
                 }
             },
@@ -120,7 +115,8 @@ fn isBlockElement(element_type: rem.Dom.ElementType) bool {
 }
 
 /// Writes text with consecutive whitespace collapsed to single spaces (HTML behavior).
-fn writeCollapsedText(writer: *Writer, text: []const u8, skip_leading: bool) Writer.Error!void {
+/// Returns whether the writer ended in a whitespace state (for continued collapsing).
+fn writeCollapsedText(writer: *Writer, text: []const u8, skip_leading: bool) Writer.Error!bool {
     var in_whitespace = skip_leading;
     for (text) |c| {
         if (std.ascii.isWhitespace(c)) {
@@ -133,6 +129,7 @@ fn writeCollapsedText(writer: *Writer, text: []const u8, skip_leading: bool) Wri
             in_whitespace = false;
         }
     }
+    return in_whitespace;
 }
 
 fn utf8DecodeString(allocator: std.mem.Allocator, string: []const u8) ![]const u21 {
