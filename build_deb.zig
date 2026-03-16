@@ -57,16 +57,18 @@ pub fn addDebStep(b: *std.Build, exe: *std.Build.Step.Compile) void {
 
     // Create control.tar.gz (control file must be at archive root)
     const control_tar = b.addSystemCommand(&.{
-        "tar", "-czf", "control.tar.gz", "--owner=0", "--group=0", "-C", "control", "control",
+        "tar", "-czf", "control.tar.gz", "--format=gnutar", "--owner=0", "--group=0", "-C", "control", "control",
     });
     control_tar.setCwd(wf.getDirectory());
+    control_tar.setEnvironmentVariable("COPYFILE_DISABLE", "1");
     control_tar.step.dependOn(&wf.step);
 
     // Create data.tar.gz
     const data_tar = b.addSystemCommand(&.{
-        "tar", "-czf", "data.tar.gz", "--owner=0", "--group=0", "-C", "data", ".",
+        "tar", "-czf", "data.tar.gz", "--format=gnutar", "--owner=0", "--group=0", "-C", "data", ".",
     });
     data_tar.setCwd(wf.getDirectory());
+    data_tar.setEnvironmentVariable("COPYFILE_DISABLE", "1");
     data_tar.step.dependOn(&wf.step);
 
     // Create the .deb archive using ar (remove first to ensure clean creation)
