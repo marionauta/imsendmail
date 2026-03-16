@@ -45,6 +45,14 @@ pub fn main() !void {
         std.process.exit(1);
     }
 
+    if (message.headers.get("Content-Type")) |content_type| {
+        if (strings.contains(content_type, "html")) {
+            const body = try html.toPlainText(message.allocator, message.body);
+            message.allocator.free(message.body);
+            message.body = body;
+        }
+    }
+
     const client = sendmail.TelegramClient{ .token = configuration.telegram_token };
 
     var it = recipients.keyIterator();
@@ -53,13 +61,6 @@ pub fn main() !void {
         const recipient = sendmail.parse_recipient(aliased) orelse {
             continue :send_message;
         };
-        if (message.headers.get("Content-Type")) |content_type| {
-            if (strings.contains(content_type, "html")) {
-                const body = try html.toPlainText(message.allocator, message.body);
-                message.allocator.free(message.body);
-                message.body = body;
-            }
-        }
         sendmail.send_message_telegram(allocator, client, recipient.telegram, message) catch |err| {
             std.log.err("failed to send message: {}", .{err});
         };
